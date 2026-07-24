@@ -5,9 +5,10 @@ compatibility_date = "2024-03-01"
 # CORS configuration (optional override)
 [vars]
 CORS_ORIGIN = "*"
+ADMIN_KEY = "JIKA_KAMU_TAHU-jangan*bilang-$apa_sapa:yah"
 
 # Binding KV Namespace (Ganti id dibawah ini dengan id KV Anda sendiri)
 [[kv_namespaces]]
 binding = "TOKEN_BALANCES"
-id = "YOUR_KV_NAMESPACE_ID_HERE"
+id = "180dc2b7d8924ddd91c6a7b4b44ae4fa"
 # preview_id = "YOUR_PREVIEW_KV_NAMESPACE_ID_HERE"
