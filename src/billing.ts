@@ -35,8 +35,15 @@ const DEFAULT_MODEL_PRICING: Record<string, ModelPrice> = {
   '@cf/meta/llama-3.3-70b-instruct-fp8-fast': { priceIn: 0.59, priceOut: 0.79 },
   '@cf/meta/llama-3.1-8b-instruct': { priceIn: 0.05, priceOut: 0.08 },
   '@cf/qwen/qwen1.5-14b-chat': { priceIn: 0.15, priceOut: 0.15 },
+
+  // --- MODEL GOOGLE GEMMA ---
+  '@cf/google/gemma-7b-it': { priceIn: 0.08, priceOut: 0.10 },
+  '@cf/google/gemma-2b-it': { priceIn: 0.03, priceOut: 0.05 },
+  '@cf/google/gemma-2-9b-it': { priceIn: 0.10, priceOut: 0.20 },
+
   'default': { priceIn: 0.50, priceOut: 1.00 }, // Fallback for unlisted models
 };
+
 
 // Rate limiter settings
 const RATE_LIMIT_MAX = 100; // max requests
