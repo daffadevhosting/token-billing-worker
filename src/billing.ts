@@ -31,15 +31,15 @@ const DEFAULT_PURCHASE_PLANS: PurchasePlan[] = [
 // Fallback pricing per 1M tokens ($)
 const DEFAULT_MODEL_PRICING: Record<string, ModelPrice> = {
   '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b': { priceIn: 0.497, priceOut: 4.881 },
-  '@cf/deepseek-ai/deepseek-math-7b-instruct': { priceIn: 0.20, priceOut: 0.20 },
-  '@cf/meta/llama-3.3-70b-instruct-fp8-fast': { priceIn: 0.59, priceOut: 0.79 },
-  '@cf/meta/llama-3.1-8b-instruct': { priceIn: 0.05, priceOut: 0.08 },
-  '@cf/qwen/qwen1.5-14b-chat': { priceIn: 0.15, priceOut: 0.15 },
+  '@cf/moonshotai/kimi-k2.7-code': { priceIn: 0.95, priceOut: 0.95 },
+  '@cf/openai/gpt-oss-120b': { priceIn: 0.59, priceOut: 0.79 },
+  '@cf/meta/llama-3.2-1b-instruct': { priceIn: 0.05, priceOut: 0.08 },
+  '@cf/qwen/qwen3-30b-a3b-fp8': { priceIn: 0.15, priceOut: 0.45 },
 
   // --- MODEL GOOGLE GEMMA ---
   '@cf/google/gemma-7b-it': { priceIn: 0.08, priceOut: 0.10 },
-  '@cf/google/gemma-2b-it': { priceIn: 0.03, priceOut: 0.05 },
-  '@cf/google/gemma-2-9b-it': { priceIn: 0.10, priceOut: 0.20 },
+  '@cf/google/gemma-2b-it-lora': { priceIn: 0.03, priceOut: 0.05 },
+  '@cf/google/gemma-4-26b-a4b-it': { priceIn: 0.15, priceOut: 0.35 },
 
   'default': { priceIn: 0.50, priceOut: 1.00 }, // Fallback for unlisted models
 };
