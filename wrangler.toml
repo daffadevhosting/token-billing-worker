@@ -1,6 +1,9 @@
 name = "ai-token-billing"
 main = "src/billing.ts"
 compatibility_date = "2024-03-01"
+[observability.logs]
+enabled = true
+invocation_logs = true
 
 # CORS configuration (optional override)
 [vars]
