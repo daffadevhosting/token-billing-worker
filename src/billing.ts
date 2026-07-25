@@ -37,10 +37,10 @@ const DEFAULT_MODEL_PRICING: Record<string, ModelPrice> = {
   '@cf/qwen/qwen3-30b-a3b-fp8': { priceIn: 0.15, priceOut: 0.45 },
 
   // --- MODEL GOOGLE GEMMA ---
-  '@cf/google/gemma-7b-it': { priceIn: 0.08, priceOut: 0.10 },
   '@cf/google/gemma-2b-it-lora': { priceIn: 0.03, priceOut: 0.05 },
+  '@cf/google/gemma-3-12b-it': { priceIn: 0.25, priceOut: 0.55 },
   '@cf/google/gemma-4-26b-a4b-it': { priceIn: 0.15, priceOut: 0.35 },
-
+  '@cf/google/gemma-7b-it': { priceIn: 0.08, priceOut: 0.10 },
   'default': { priceIn: 0.50, priceOut: 1.00 }, // Fallback for unlisted models
 };
 
