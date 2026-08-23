@@ -38,7 +38,7 @@ const DEFAULT_MODEL_PRICING: Record<string, ModelPrice> = {
   '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b': { priceIn: 0.497, priceOut: 4.881 },
   '@cf/moonshotai/kimi-k2.7-code': { priceIn: 0.95, priceOut: 0.95 },
   '@cf/openai/gpt-oss-120b': { priceIn: 0.59, priceOut: 0.79 },
-  '@cf/meta/llama-3.2-1b-instruct': { priceIn: 0.05, priceOut: 0.08 },
+  '@cf/qwen/qwen2.5-coder-32b-instruct': { priceIn: 0.05, priceOut: 0.08 },
   '@cf/qwen/qwen3-30b-a3b-fp8': { priceIn: 0.15, priceOut: 0.45 },
   '@cf/google/gemma-2b-it-lora': { priceIn: 0.03, priceOut: 0.05 },
   '@cf/google/gemma-3-12b-it': { priceIn: 0.25, priceOut: 0.55 },
