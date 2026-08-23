@@ -56,6 +56,7 @@ const IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 const Keys = {
   balance: (userId: string) => `balance:${userId}`,
   consumed: (requestId: string) => `consumed:${requestId}`,
+  purchase: (referenceId: string) => `purchase:${referenceId}`,
   rate: (userId: string) => `rate:${userId}`,
   modelPricing: (model: string) => `model:${model}`,
 };
@@ -194,15 +195,25 @@ async function handlePurchase(request: Request, env: Env): Promise<Response> {
   const plan = DEFAULT_PURCHASE_PLANS.find((p) => p.sku === body.sku);
   if (!plan) return jsonResponse({ ok: false, error: 'unknown_sku' }, 400, env);
 
+  const referenceId = body.referenceId || `purchase:${body.userId}:${crypto.randomUUID()}`;
+  const previousPurchase = await env.TOKEN_BALANCES.get(Keys.purchase(referenceId));
+  if (previousPurchase) {
+    return jsonResponse({ ...JSON.parse(previousPurchase), idempotent: true }, 200, env);
+  }
+
   const newBalance = await updateBalance(env.TOKEN_BALANCES, body.userId, plan.tokens);
-  
-  return jsonResponse({
+
+  const result = {
     ok: true,
     userId: body.userId,
     credited: plan.tokens,
     newBalance,
-    referenceId: body.referenceId || null,
-  }, 200, env);
+    referenceId,
+  };
+  await env.TOKEN_BALANCES.put(Keys.purchase(referenceId), JSON.stringify(result), {
+    expirationTtl: IDEMPOTENCY_TTL_SECONDS,
+  });
+  return jsonResponse(result, 200, env);
 }
 
 async function handleConsume(request: Request, env: Env): Promise<Response> {
