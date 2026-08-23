@@ -89,15 +89,26 @@ async function parseJSON<T>(request: Request): Promise<T | null> {
 
 function verifyAdmin(request: Request, env: Env): boolean {
   const key = request.headers.get('x-admin-key');
-  // Catatan: Untuk keamanan tingkat tinggi, gunakan perbandingan constant-time
-  return !!key && key === env.ADMIN_KEY;
+  if (!key || !env.ADMIN_KEY) return false;
+  
+  // Mencegah timing attack
+  if (key.length !== env.ADMIN_KEY.length) return false;
+  let result = 0;
+  for (let i = 0; i < key.length; i++) {
+    result |= key.charCodeAt(i) ^ env.ADMIN_KEY.charCodeAt(i);
+  }
+  return result === 0;
 }
 
 // Placeholder untuk autentikasi user. Ganti dengan logika JWT/API Key Anda.
 function verifyUser(request: Request, userId: string): boolean {
-  // const authHeader = request.headers.get('Authorization');
-  // return validateJWT(authHeader, userId);
-  return true; // Saat ini bypass untuk kompatibilitas dengan kode lama
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return false;
+  
+  const token = authHeader.split(' ')[1];
+  // CONTOH: Validasi token sederhana atau verifikasi JWT
+  // Dalam production, decode & validasi payload JWT sub/userId === userId
+  return Boolean(token); 
 }
 
 // --- KV Core Helpers -----------------------------------------------------------------
