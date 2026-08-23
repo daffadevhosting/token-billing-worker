@@ -1,12 +1,18 @@
 /**
  * Universal AI Token Billing System - Cloudflare Worker
  * Supports multi-model pricing, rate limiting, idempotency, and admin controls.
+ * 
+ * CATATAN PENTING UNTUK PRODUCTION:
+ * Cloudflare KV tidak mendukung operasi atomik (transaksi). 
+ * Untuk sistem billing/keuangan, sangat disarankan menggunakan Cloudflare D1 atau Durable Objects 
+ * untuk mencegah race conditions pada update saldo.
  */
 
 export interface Env {
   TOKEN_BALANCES: KVNamespace;
   ADMIN_KEY: string;
   CORS_ORIGIN?: string;
+  // Tambahkan binding untuk Auth jika diperlukan (misal: AUTH_SECRET)
 }
 
 interface PurchasePlan {
@@ -28,37 +34,34 @@ const DEFAULT_PURCHASE_PLANS: PurchasePlan[] = [
   { sku: 'ENTERPRISE', tokens: 10_000_000, priceUSD: 100 },
 ];
 
-// Fallback pricing per 1M tokens ($)
 const DEFAULT_MODEL_PRICING: Record<string, ModelPrice> = {
   '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b': { priceIn: 0.497, priceOut: 4.881 },
   '@cf/moonshotai/kimi-k2.7-code': { priceIn: 0.95, priceOut: 0.95 },
   '@cf/openai/gpt-oss-120b': { priceIn: 0.59, priceOut: 0.79 },
   '@cf/meta/llama-3.2-1b-instruct': { priceIn: 0.05, priceOut: 0.08 },
   '@cf/qwen/qwen3-30b-a3b-fp8': { priceIn: 0.15, priceOut: 0.45 },
-
-  // --- MODEL GOOGLE GEMMA ---
   '@cf/google/gemma-2b-it-lora': { priceIn: 0.03, priceOut: 0.05 },
   '@cf/google/gemma-3-12b-it': { priceIn: 0.25, priceOut: 0.55 },
   '@cf/google/gemma-4-26b-a4b-it': { priceIn: 0.15, priceOut: 0.35 },
   '@cf/google/gemma-7b-it': { priceIn: 0.08, priceOut: 0.10 },
-  'default': { priceIn: 0.50, priceOut: 1.00 }, // Fallback for unlisted models
+  'default': { priceIn: 0.50, priceOut: 1.00 },
 };
 
+// --- Constants -----------------------------------------------------------------------
+const RATE_LIMIT_MAX = 100; 
+const RATE_LIMIT_WINDOW = 60; 
+const IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
-// Rate limiter settings
-const RATE_LIMIT_MAX = 100; // max requests
-const RATE_LIMIT_WINDOW = 60; // window in seconds
-const IDEMPOTENCY_TTL_DAYS = 7; // days to keep requestId history
-
-// Key Generators
-const BALANCE_KEY = (userId: string) => `balance:${userId}`;
-const CONSUMED_KEY = (requestId: string) => `consumed:${requestId}`;
-const RATE_KEY = (userId: string) => `rate:${userId}`;
-const MODEL_PRICING_KEY = (model: string) => `model:${model}`;
+// --- Key Generators ------------------------------------------------------------------
+const Keys = {
+  balance: (userId: string) => `balance:${userId}`,
+  consumed: (requestId: string) => `consumed:${requestId}`,
+  rate: (userId: string) => `rate:${userId}`,
+  modelPricing: (model: string) => `model:${model}`,
+};
 
 // --- Utility Helpers -----------------------------------------------------------------
-
-function getCorsHeaders(env: Env): HeadersInit {
+function getCorsHeaders(env: Env): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': env.CORS_ORIGIN || '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -66,12 +69,14 @@ function getCorsHeaders(env: Env): HeadersInit {
   };
 }
 
-function jsonResponse(data: any, status = 200, env?: Env): Response {
-  const headers: HeadersInit = {
-    'Content-Type': 'application/json',
-    ...(env ? getCorsHeaders(env) : { 'Access-Control-Allow-Origin': '*' }),
-  };
-  return new Response(JSON.stringify(data), { status, headers });
+function jsonResponse(data: unknown, status = 200, env?: Env): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(env ? getCorsHeaders(env) : { 'Access-Control-Allow-Origin': '*' }),
+    },
+  });
 }
 
 async function parseJSON<T>(request: Request): Promise<T | null> {
@@ -84,13 +89,20 @@ async function parseJSON<T>(request: Request): Promise<T | null> {
 
 function verifyAdmin(request: Request, env: Env): boolean {
   const key = request.headers.get('x-admin-key');
+  // Catatan: Untuk keamanan tingkat tinggi, gunakan perbandingan constant-time
   return !!key && key === env.ADMIN_KEY;
 }
 
-// --- KV Core Helpers -----------------------------------------------------------------
+// Placeholder untuk autentikasi user. Ganti dengan logika JWT/API Key Anda.
+function verifyUser(request: Request, userId: string): boolean {
+  // const authHeader = request.headers.get('Authorization');
+  // return validateJWT(authHeader, userId);
+  return true; // Saat ini bypass untuk kompatibilitas dengan kode lama
+}
 
+// --- KV Core Helpers -----------------------------------------------------------------
 async function getBalance(kv: KVNamespace, userId: string): Promise<number> {
-  const raw = await kv.get(BALANCE_KEY(userId));
+  const raw = await kv.get(Keys.balance(userId));
   if (!raw) return 0;
   const val = parseFloat(raw);
   return isNaN(val) ? 0 : val;
@@ -99,92 +111,80 @@ async function getBalance(kv: KVNamespace, userId: string): Promise<number> {
 async function updateBalance(kv: KVNamespace, userId: string, delta: number): Promise<number> {
   const current = await getBalance(kv, userId);
   const next = Math.max(0, current + delta);
-  await kv.put(BALANCE_KEY(userId), next.toString());
+  await kv.put(Keys.balance(userId), next.toString());
   return next;
 }
 
 async function isRequestProcessed(kv: KVNamespace, requestId: string): Promise<boolean> {
-  return (await kv.get(CONSUMED_KEY(requestId))) !== null;
+  return (await kv.get(Keys.consumed(requestId))) !== null;
 }
 
 async function markRequestProcessed(kv: KVNamespace, requestId: string): Promise<void> {
-  await kv.put(CONSUMED_KEY(requestId), '1', {
-    expirationTtl: IDEMPOTENCY_TTL_DAYS * 24 * 60 * 60,
-  });
+  await kv.put(Keys.consumed(requestId), '1', { expirationTtl: IDEMPOTENCY_TTL_SECONDS });
 }
 
 async function checkRateLimit(kv: KVNamespace, userId: string): Promise<boolean> {
-  const key = RATE_KEY(userId);
+  const key = Keys.rate(userId);
   const raw = await kv.get(key);
   const now = Math.floor(Date.now() / 1000);
-
+  
   let data: { count: number; start: number } = raw ? JSON.parse(raw) : { count: 0, start: now };
-
+  
   if (now - data.start >= RATE_LIMIT_WINDOW) {
     data = { count: 1, start: now };
   } else {
     data.count += 1;
   }
-
+  
   if (data.count > RATE_LIMIT_MAX) {
     return false;
   }
-
+  
   const ttl = Math.max(5, RATE_LIMIT_WINDOW - (now - data.start));
   await kv.put(key, JSON.stringify(data), { expirationTtl: ttl });
   return true;
 }
 
 async function getModelPrices(kv: KVNamespace, modelName: string): Promise<ModelPrice> {
-  // Check KV override first
-  const cached = await kv.get(MODEL_PRICING_KEY(modelName));
+  const cached = await kv.get(Keys.modelPricing(modelName));
   if (cached) {
     try {
-      return JSON.parse(cached);
+      return JSON.parse(cached) as ModelPrice;
     } catch {
-      // fallback if JSON parse fails
+      // Fallback jika format JSON di KV rusak
     }
   }
-
-  // Fallback to static mapping
   return DEFAULT_MODEL_PRICING[modelName] || DEFAULT_MODEL_PRICING['default'];
 }
 
 // --- Route Handlers ------------------------------------------------------------------
-
-// GET /plans
 async function handlePlans(env: Env): Promise<Response> {
   return jsonResponse({ ok: true, plans: DEFAULT_PURCHASE_PLANS }, 200, env);
 }
 
-// GET /balance?userId=...
 async function handleGetBalance(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const userId = url.searchParams.get('userId');
-
-  if (!userId) {
-    return jsonResponse({ ok: false, error: 'missing_userId' }, 400, env);
-  }
+  
+  if (!userId) return jsonResponse({ ok: false, error: 'missing_userId' }, 400, env);
+  if (!verifyUser(request, userId)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env);
 
   const balance = await getBalance(env.TOKEN_BALANCES, userId);
   return jsonResponse({ ok: true, userId, balance }, 200, env);
 }
 
-// POST /purchase
 async function handlePurchase(request: Request, env: Env): Promise<Response> {
   const body = await parseJSON<{ userId: string; sku: string; referenceId?: string }>(request);
-
-  if (!body || !body.userId || !body.sku) {
+  if (!body?.userId || !body.sku) {
     return jsonResponse({ ok: false, error: 'invalid_body' }, 400, env);
   }
+  if (!verifyUser(request, body.userId)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env);
 
   const plan = DEFAULT_PURCHASE_PLANS.find((p) => p.sku === body.sku);
-  if (!plan) {
-    return jsonResponse({ ok: false, error: 'unknown_sku' }, 400, env);
-  }
+  if (!plan) return jsonResponse({ ok: false, error: 'unknown_sku' }, 400, env);
 
   const newBalance = await updateBalance(env.TOKEN_BALANCES, body.userId, plan.tokens);
-
+  
   return jsonResponse({
     ok: true,
     userId: body.userId,
@@ -194,21 +194,30 @@ async function handlePurchase(request: Request, env: Env): Promise<Response> {
   }, 200, env);
 }
 
-// POST /consume
 async function handleConsume(request: Request, env: Env): Promise<Response> {
   const body = await parseJSON<{
     userId: string;
     requestId: string;
-    promptTokens: number;
-    completionTokens: number;
+    promptTokens?: number;
+    completionTokens?: number;
     model?: string;
   }>(request);
 
-  if (!body || !body.userId || !body.requestId) {
+  if (!body?.userId || !body.requestId) {
     return jsonResponse({ ok: false, error: 'invalid_body' }, 400, env);
   }
+  if (!verifyUser(request, body.userId)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env);
 
-  const { userId, requestId, promptTokens = 0, completionTokens = 0, model = 'default' } = body;
+  const { userId, requestId, model = 'default' } = body;
+  
+  // FIX: Pastikan konversi ke number aman dan fallback ke 0 jika undefined/NaN
+  const promptTokens = Number(body.promptTokens) || 0;
+  const completionTokens = Number(body.completionTokens) || 0;
+  const totalModelTokens = promptTokens + completionTokens;
+
+  if (totalModelTokens <= 0) {
+    return jsonResponse({ ok: false, error: 'invalid_token_count' }, 400, env);
+  }
 
   // Rate Limiting
   const allowed = await checkRateLimit(env.TOKEN_BALANCES, userId);
@@ -216,21 +225,18 @@ async function handleConsume(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ ok: false, error: 'rate_limit_exceeded' }, 429, env);
   }
 
-  // Idempotency
+  // Idempotency Check
   const processed = await isRequestProcessed(env.TOKEN_BALANCES, requestId);
   if (processed) {
     const currentBalance = await getBalance(env.TOKEN_BALANCES, userId);
     return jsonResponse({ ok: true, message: 'already_consumed', balance: currentBalance }, 200, env);
   }
 
-  // Calculate user tokens deduction (1 model token = 1 user token, adjustable)
-  const totalModelTokens = Number(promptTokens) + Number(completionTokens);
-  
-  // Cost breakdown estimation (USD)
+  // Calculate Cost
   const prices = await getModelPrices(env.TOKEN_BALANCES, model);
   const costUSD = (promptTokens * prices.priceIn + completionTokens * prices.priceOut) / 1_000_000;
 
-  // Check balance
+  // Check Balance
   const currentBalance = await getBalance(env.TOKEN_BALANCES, userId);
   if (currentBalance < totalModelTokens) {
     return jsonResponse({
@@ -241,7 +247,7 @@ async function handleConsume(request: Request, env: Env): Promise<Response> {
     }, 402, env);
   }
 
-  // Deduct Balance and Mark Idempotent
+  // Deduct & Mark Processed
   const newBalance = await updateBalance(env.TOKEN_BALANCES, userId, -totalModelTokens);
   await markRequestProcessed(env.TOKEN_BALANCES, requestId);
 
@@ -256,13 +262,11 @@ async function handleConsume(request: Request, env: Env): Promise<Response> {
 }
 
 // --- Admin Handlers ------------------------------------------------------------------
-
-// POST /admin/balance/topup
 async function handleAdminTopUp(request: Request, env: Env): Promise<Response> {
   if (!verifyAdmin(request, env)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env);
-
+  
   const body = await parseJSON<{ userId: string; amount: number }>(request);
-  if (!body || !body.userId || typeof body.amount !== 'number') {
+  if (!body?.userId || typeof body.amount !== 'number' || isNaN(body.amount)) {
     return jsonResponse({ ok: false, error: 'invalid_body' }, 400, env);
   }
 
@@ -270,23 +274,21 @@ async function handleAdminTopUp(request: Request, env: Env): Promise<Response> {
   return jsonResponse({ ok: true, userId: body.userId, newBalance }, 200, env);
 }
 
-// POST /admin/models
 async function handleAdminSetModelPrice(request: Request, env: Env): Promise<Response> {
   if (!verifyAdmin(request, env)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env);
-
+  
   const body = await parseJSON<{ model: string; priceIn: number; priceOut: number }>(request);
-  if (!body || !body.model || typeof body.priceIn !== 'number' || typeof body.priceOut !== 'number') {
+  if (!body?.model || typeof body.priceIn !== 'number' || typeof body.priceOut !== 'number') {
     return jsonResponse({ ok: false, error: 'invalid_body' }, 400, env);
   }
 
   const modelData: ModelPrice = { priceIn: body.priceIn, priceOut: body.priceOut };
-  await env.TOKEN_BALANCES.put(MODEL_PRICING_KEY(body.model), JSON.stringify(modelData));
-
+  await env.TOKEN_BALANCES.put(Keys.modelPricing(body.model), JSON.stringify(modelData));
+  
   return jsonResponse({ ok: true, model: body.model, pricing: modelData }, 200, env);
 }
 
 // --- Main Fetch Event Handler --------------------------------------------------------
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Handle CORS Preflight
@@ -295,41 +297,31 @@ export default {
     }
 
     const url = new URL(request.url);
-    const { pathname, searchParams } = url;
+    const route = `${request.method} ${url.pathname}`;
 
     try {
-      if (request.method === 'GET' && pathname === '/') {
-        return jsonResponse({ ok: true, service: 'CF Workers AI Billing System', status: 'online' }, 200, env);
+      switch (route) {
+        case 'GET /':
+          return jsonResponse({ ok: true, service: 'CF Workers AI Billing System', status: 'online' }, 200, env);
+        case 'GET /plans':
+          return handlePlans(env);
+        case 'GET /balance':
+          return handleGetBalance(request, env);
+        case 'POST /purchase':
+          return handlePurchase(request, env);
+        case 'POST /consume':
+          return handleConsume(request, env);
+        case 'POST /admin/balance/topup':
+          return handleAdminTopUp(request, env);
+        case 'POST /admin/models':
+          return handleAdminSetModelPrice(request, env);
+        default:
+          return jsonResponse({ ok: false, error: 'not_found' }, 404, env);
       }
-
-      if (request.method === 'GET' && pathname === '/plans') {
-        return handlePlans(env);
-      }
-
-      if (request.method === 'GET' && pathname === '/balance') {
-        return handleGetBalance(request, env);
-      }
-
-      if (request.method === 'POST' && pathname === '/purchase') {
-        return handlePurchase(request, env);
-      }
-
-      if (request.method === 'POST' && pathname === '/consume') {
-        return handleConsume(request, env);
-      }
-
-      // Admin Routes
-      if (request.method === 'POST' && pathname === '/admin/balance/topup') {
-        return handleAdminTopUp(request, env);
-      }
-
-      if (request.method === 'POST' && pathname === '/admin/models') {
-        return handleAdminSetModelPrice(request, env);
-      }
-
-      return jsonResponse({ ok: false, error: 'not_found' }, 404, env);
-    } catch (err: any) {
-      return jsonResponse({ ok: false, error: 'internal_error', message: err.message }, 500, env);
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      console.error('Worker Error:', errorMessage);
+      return jsonResponse({ ok: false, error: 'internal_error', message: errorMessage }, 500, env);
     }
   },
 };
