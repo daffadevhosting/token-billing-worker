@@ -62,20 +62,40 @@ const Keys = {
 };
 
 // --- Utility Helpers -----------------------------------------------------------------
-function getCorsHeaders(env: Env): Record<string, string> {
+function getCorsHeaders(env: Env, request?: Request): Record<string, string> {
+  const origin = request?.headers.get('Origin') || '';
+  const allowedOrigins = [
+    'https://vibecode-82m.pages.dev',
+    'https://vibecode.harisudahmalam.workers.dev',
+    'http://localhost:4000',
+    'http://127.0.0.1:4000',
+    env.CORS_ORIGIN
+  ].filter(Boolean) as string[];
+  
+  // Jika origin ada di allowedOrigins, gunakan origin tersebut
+  // Jika CORS_ORIGIN di-set, gunakan itu
+  // Jika tidak, gunakan * (tapi ini tidak aman untuk credentials)
+  const corsOrigin = allowedOrigins.includes(origin) ? origin : 
+                    (env.CORS_ORIGIN || '*');
+  
+  // Jika origin adalah * dan request memiliki credentials, jangan izinkan
+  const allowCredentials = corsOrigin !== '*';
+  
   return {
-    'Access-Control-Allow-Origin': env.CORS_ORIGIN || '*',
+    'Access-Control-Allow-Origin': corsOrigin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-key',
+    'Access-Control-Allow-Credentials': allowCredentials ? 'true' : 'false',
+    'Access-Control-Max-Age': '86400',
   };
 }
 
-function jsonResponse(data: unknown, status = 200, env?: Env): Response {
+function jsonResponse(data: unknown, status = 200, env?: Env, request?: Request): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       'Content-Type': 'application/json',
-      ...(env ? getCorsHeaders(env) : { 'Access-Control-Allow-Origin': '*' }),
+      ...(env ? getCorsHeaders(env, request) : { 'Access-Control-Allow-Origin': '*' }),
     },
   });
 }
@@ -109,6 +129,22 @@ function verifyUser(request: Request, userId: string): boolean {
   const token = authHeader.split(' ')[1];
   // CONTOH: Validasi token sederhana atau verifikasi JWT
   // Dalam production, decode & validasi payload JWT sub/userId === userId
+  
+  // Untuk demo, izinkan token apapun yang tidak kosong
+  // Atau validasi token sederhana
+  if (!token) return false;
+  
+  // Jika menggunakan demo-token, izinkan semua userId
+  if (token === 'demo-token') return true;
+  
+  // Jika menggunakan JWT, validasi di sini
+  // try {
+  //   const payload = JSON.parse(atob(token.split('.')[1]));
+  //   return payload.sub === userId;
+  // } catch {
+  //   return false;
+  // }
+  
   return Boolean(token); 
 }
 
@@ -170,35 +206,35 @@ async function getModelPrices(kv: KVNamespace, modelName: string): Promise<Model
 }
 
 // --- Route Handlers ------------------------------------------------------------------
-async function handlePlans(env: Env): Promise<Response> {
-  return jsonResponse({ ok: true, plans: DEFAULT_PURCHASE_PLANS }, 200, env);
+async function handlePlans(env: Env, request?: Request): Promise<Response> {
+  return jsonResponse({ ok: true, plans: DEFAULT_PURCHASE_PLANS }, 200, env, request);
 }
 
 async function handleGetBalance(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const userId = url.searchParams.get('userId');
   
-  if (!userId) return jsonResponse({ ok: false, error: 'missing_userId' }, 400, env);
-  if (!verifyUser(request, userId)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env);
+  if (!userId) return jsonResponse({ ok: false, error: 'missing_userId' }, 400, env, request);
+  if (!verifyUser(request, userId)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env, request);
 
   const balance = await getBalance(env.TOKEN_BALANCES, userId);
-  return jsonResponse({ ok: true, userId, balance }, 200, env);
+  return jsonResponse({ ok: true, userId, balance }, 200, env, request);
 }
 
 async function handlePurchase(request: Request, env: Env): Promise<Response> {
   const body = await parseJSON<{ userId: string; sku: string; referenceId?: string }>(request);
   if (!body?.userId || !body.sku) {
-    return jsonResponse({ ok: false, error: 'invalid_body' }, 400, env);
+    return jsonResponse({ ok: false, error: 'invalid_body' }, 400, env, request);
   }
-  if (!verifyUser(request, body.userId)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env);
+  if (!verifyUser(request, body.userId)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env, request);
 
   const plan = DEFAULT_PURCHASE_PLANS.find((p) => p.sku === body.sku);
-  if (!plan) return jsonResponse({ ok: false, error: 'unknown_sku' }, 400, env);
+  if (!plan) return jsonResponse({ ok: false, error: 'unknown_sku' }, 400, env, request);
 
   const referenceId = body.referenceId || `purchase:${body.userId}:${crypto.randomUUID()}`;
   const previousPurchase = await env.TOKEN_BALANCES.get(Keys.purchase(referenceId));
   if (previousPurchase) {
-    return jsonResponse({ ...JSON.parse(previousPurchase), idempotent: true }, 200, env);
+    return jsonResponse({ ...JSON.parse(previousPurchase), idempotent: true }, 200, env, request);
   }
 
   const newBalance = await updateBalance(env.TOKEN_BALANCES, body.userId, plan.tokens);
@@ -213,7 +249,7 @@ async function handlePurchase(request: Request, env: Env): Promise<Response> {
   await env.TOKEN_BALANCES.put(Keys.purchase(referenceId), JSON.stringify(result), {
     expirationTtl: IDEMPOTENCY_TTL_SECONDS,
   });
-  return jsonResponse(result, 200, env);
+  return jsonResponse(result, 200, env, request);
 }
 
 async function handleConsume(request: Request, env: Env): Promise<Response> {
@@ -244,14 +280,14 @@ async function handleConsume(request: Request, env: Env): Promise<Response> {
   // Rate Limiting
   const allowed = await checkRateLimit(env.TOKEN_BALANCES, userId);
   if (!allowed) {
-    return jsonResponse({ ok: false, error: 'rate_limit_exceeded' }, 429, env);
+    return jsonResponse({ ok: false, error: 'rate_limit_exceeded' }, 429, env, request);
   }
 
   // Idempotency Check
   const processed = await isRequestProcessed(env.TOKEN_BALANCES, requestId);
   if (processed) {
     const currentBalance = await getBalance(env.TOKEN_BALANCES, userId);
-    return jsonResponse({ ok: true, message: 'already_consumed', balance: currentBalance }, 200, env);
+    return jsonResponse({ ok: true, message: 'already_consumed', balance: currentBalance }, 200, env, request);
   }
 
   // Calculate Cost
@@ -266,7 +302,7 @@ async function handleConsume(request: Request, env: Env): Promise<Response> {
       error: 'insufficient_balance',
       required: totalModelTokens,
       balance: currentBalance,
-    }, 402, env);
+    }, 402, env, request);
   }
 
   // Deduct & Mark Processed
@@ -280,34 +316,34 @@ async function handleConsume(request: Request, env: Env): Promise<Response> {
     deducted: totalModelTokens,
     newBalance,
     estimatedCostUSD: costUSD,
-  }, 200, env);
+  }, 200, env, request);
 }
 
 // --- Admin Handlers ------------------------------------------------------------------
 async function handleAdminTopUp(request: Request, env: Env): Promise<Response> {
-  if (!verifyAdmin(request, env)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env);
+  if (!verifyAdmin(request, env)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env, request);
   
   const body = await parseJSON<{ userId: string; amount: number }>(request);
   if (!body?.userId || typeof body.amount !== 'number' || isNaN(body.amount)) {
-    return jsonResponse({ ok: false, error: 'invalid_body' }, 400, env);
+    return jsonResponse({ ok: false, error: 'invalid_body' }, 400, env, request);
   }
 
   const newBalance = await updateBalance(env.TOKEN_BALANCES, body.userId, body.amount);
-  return jsonResponse({ ok: true, userId: body.userId, newBalance }, 200, env);
+  return jsonResponse({ ok: true, userId: body.userId, newBalance }, 200, env, request);
 }
 
 async function handleAdminSetModelPrice(request: Request, env: Env): Promise<Response> {
-  if (!verifyAdmin(request, env)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env);
+  if (!verifyAdmin(request, env)) return jsonResponse({ ok: false, error: 'unauthorized' }, 401, env, request);
   
   const body = await parseJSON<{ model: string; priceIn: number; priceOut: number }>(request);
   if (!body?.model || typeof body.priceIn !== 'number' || typeof body.priceOut !== 'number') {
-    return jsonResponse({ ok: false, error: 'invalid_body' }, 400, env);
+    return jsonResponse({ ok: false, error: 'invalid_body' }, 400, env, request);
   }
 
   const modelData: ModelPrice = { priceIn: body.priceIn, priceOut: body.priceOut };
   await env.TOKEN_BALANCES.put(Keys.modelPricing(body.model), JSON.stringify(modelData));
   
-  return jsonResponse({ ok: true, model: body.model, pricing: modelData }, 200, env);
+  return jsonResponse({ ok: true, model: body.model, pricing: modelData }, 200, env, request);
 }
 
 // --- Main Fetch Event Handler --------------------------------------------------------
@@ -315,7 +351,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Handle CORS Preflight
     if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: getCorsHeaders(env) });
+      return new Response(null, { headers: getCorsHeaders(env, request) });
     }
 
     const url = new URL(request.url);
@@ -324,9 +360,9 @@ export default {
     try {
       switch (route) {
         case 'GET /':
-          return jsonResponse({ ok: true, service: 'CF Workers AI Billing System', status: 'online' }, 200, env);
+          return jsonResponse({ ok: true, service: 'CF Workers AI Billing System', status: 'online' }, 200, env, request);
         case 'GET /plans':
-          return handlePlans(env);
+          return handlePlans(env, request);
         case 'GET /balance':
           return handleGetBalance(request, env);
         case 'POST /purchase':
@@ -338,12 +374,12 @@ export default {
         case 'POST /admin/models':
           return handleAdminSetModelPrice(request, env);
         default:
-          return jsonResponse({ ok: false, error: 'not_found' }, 404, env);
+          return jsonResponse({ ok: false, error: 'not_found' }, 404, env, request);
       }
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       console.error('Worker Error:', errorMessage);
-      return jsonResponse({ ok: false, error: 'internal_error', message: errorMessage }, 500, env);
+      return jsonResponse({ ok: false, error: 'internal_error', message: errorMessage }, 500, env, request);
     }
   },
 };
