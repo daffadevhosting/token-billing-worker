@@ -7,7 +7,7 @@ invocation_logs = true
 
 # CORS configuration (optional override)
 [vars]
-CORS_ORIGIN = "https://vibecode-82m.pages.dev"
+CORS_ORIGIN = "*"
 ADMIN_KEY = "JIKA_KAMU_TAHU-jangan*bilang-$apa_sapa:yah"
 
 # Binding KV Namespace (Ganti id dibawah ini dengan id KV Anda sendiri)
